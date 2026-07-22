@@ -100,6 +100,21 @@ export interface FootprinterDiscoveryResult {
   target: FootprintPreview
 }
 
+const getOrientedHeuristics = (
+  seed: SeedCandidate,
+  analysis: TargetAnalysis,
+): Record<NumericParameter, number> => {
+  if (seed.searchRotation !== 90 && seed.searchRotation !== 270) {
+    return analysis.heuristics
+  }
+
+  return {
+    ...analysis.heuristics,
+    h: analysis.heuristics.w,
+    w: analysis.heuristics.h,
+  }
+}
+
 const clamp = (value: number, min: number, max: number) =>
   Math.min(Math.max(value, min), max)
 
@@ -535,6 +550,12 @@ const geometrySignature = (preview: FootprintPreview) =>
     })
     .join("|")
 
+const padShapeSignature = (preview: FootprintPreview) =>
+  preview.pads
+    .map((pad) => `${pad.kind}:${pad.shape}`)
+    .toSorted()
+    .join("|")
+
 const areClose = (left: number, right: number) =>
   Math.abs(left - right) <= 0.00001
 
@@ -696,8 +717,27 @@ const generateSeeds = (target: FootprintPreview, analysis: TargetAnalysis) => {
 const selectSeedsToOptimize = (
   candidates: SeedCandidate[],
   analysis: TargetAnalysis,
+  target: FootprintPreview,
 ) => {
   const selected = new Map<string, SeedCandidate>()
+  const targetPadShapeSignature = padShapeSignature(target)
+  const selectedShapeFamilies = new Set<string>()
+
+  if (target.pads.some((pad) => pad.shape === "pill")) {
+    for (const candidate of candidates) {
+      if (padShapeSignature(candidate.preview) !== targetPadShapeSignature) {
+        continue
+      }
+      if (selectedShapeFamilies.has(candidate.family)) continue
+      selectedShapeFamilies.add(candidate.family)
+      selected.set(
+        `${candidate.footprinterString}:${candidate.searchRotation}`,
+        candidate,
+      )
+      if (selected.size >= 4) break
+    }
+  }
+
   for (const candidate of candidates.slice(0, 4)) {
     selected.set(
       `${candidate.footprinterString}:${candidate.searchRotation}`,
@@ -738,9 +778,10 @@ const findActiveParameters = (
 ) => {
   const active: NumericParameter[] = []
   const baseSignature = geometrySignature(seed.preview)
+  const heuristics = getOrientedHeuristics(seed, analysis)
 
   for (const parameter of NUMERIC_PARAMETERS) {
-    const heuristic = Math.max(analysis.heuristics[parameter], 0.05)
+    const heuristic = Math.max(heuristics[parameter], 0.05)
     const preview = tryBuild(
       buildParameterizedString(seed.footprinterString, {
         [parameter]: heuristic,
@@ -775,8 +816,9 @@ const optimizeSeed = (
   }
 
   const values: Partial<Record<NumericParameter, number>> = {}
+  const heuristics = getOrientedHeuristics(seed, analysis)
   for (const parameter of activeParameters) {
-    values[parameter] = Math.max(analysis.heuristics[parameter], 0.05)
+    values[parameter] = Math.max(heuristics[parameter], 0.05)
   }
 
   const evaluate = (parameters: Partial<Record<NumericParameter, number>>) => {
@@ -831,13 +873,13 @@ const optimizeSeed = (
       secondMoments[parameter] = secondMoment
       const correctedFirstMoment = firstMoment / (1 - 0.9 ** iteration)
       const correctedSecondMoment = secondMoment / (1 - 0.999 ** iteration)
-      const stepScale = Math.max(analysis.heuristics[parameter] * 0.075, 0.025)
+      const stepScale = Math.max(heuristics[parameter] * 0.075, 0.025)
       const currentValue = values[parameter] ?? 0.05
       const upperBound =
         Math.max(
           analysis.bounds.width,
           analysis.bounds.height,
-          analysis.heuristics[parameter],
+          heuristics[parameter],
         ) * 3
       values[parameter] = clamp(
         currentValue -
@@ -940,7 +982,7 @@ export const discoverFootprinterString = (
       left.searchRotation - right.searchRotation,
   )
 
-  const selectedSeeds = selectSeedsToOptimize(seedCandidates, analysis)
+  const selectedSeeds = selectSeedsToOptimize(seedCandidates, analysis, target)
   const optimized = selectedSeeds.map((seed) =>
     optimizeSeed(seed, target, analysis),
   )
