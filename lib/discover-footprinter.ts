@@ -5,6 +5,11 @@ import {
   type PreviewPad,
 } from "./circuit-json-preview.js"
 import { summarizeCopperComparison } from "./compare-copper.js"
+import {
+  type Bounds,
+  getFootprintBounds,
+  getPolygonWorldPoints,
+} from "./preview-geometry.js"
 
 const SEARCH_GRID_SIZE = 112
 const MAX_OPTIMIZED_SEEDS = 10
@@ -40,15 +45,6 @@ const PIN1_LOCATIONS: Pin1Location[] = [
   ["bottomside", "left"],
   ["bottomside", "right"],
 ]
-
-interface Bounds {
-  height: number
-  maxX: number
-  maxY: number
-  minX: number
-  minY: number
-  width: number
-}
 
 interface TargetAnalysis {
   bounds: Bounds
@@ -141,39 +137,9 @@ const median = (values: number[]) => {
     : sorted[middle]
 }
 
-const getPadBounds = (pad: PreviewPad): Bounds => {
-  const radians = (pad.rotation * Math.PI) / 180
-  const cosine = Math.abs(Math.cos(radians))
-  const sine = Math.abs(Math.sin(radians))
-  const width = pad.width * cosine + pad.height * sine
-  const height = pad.width * sine + pad.height * cosine
+const getPadBounds = (pad: PreviewPad): Bounds => getFootprintBounds([pad])
 
-  return {
-    height,
-    maxX: pad.x + width / 2,
-    maxY: pad.y + height / 2,
-    minX: pad.x - width / 2,
-    minY: pad.y - height / 2,
-    width,
-  }
-}
-
-const getBounds = (pads: PreviewPad[]): Bounds => {
-  const padBounds = pads.map(getPadBounds)
-  const minX = Math.min(...padBounds.map((bound) => bound.minX))
-  const minY = Math.min(...padBounds.map((bound) => bound.minY))
-  const maxX = Math.max(...padBounds.map((bound) => bound.maxX))
-  const maxY = Math.max(...padBounds.map((bound) => bound.maxY))
-
-  return {
-    height: maxY - minY,
-    maxX,
-    maxY,
-    minX,
-    minY,
-    width: maxX - minX,
-  }
-}
+const getBounds = (pads: PreviewPad[]): Bounds => getFootprintBounds(pads)
 
 const clusterCoordinates = (values: number[], tolerance: number) => {
   const sorted = [...values].sort((left, right) => left - right)
@@ -618,6 +584,10 @@ const geometrySignature = (preview: FootprintPreview) =>
             pad.hole.rotation,
           ].join(":")
         : "no-hole"
+      const pointSignature =
+        pad.shape === "polygon"
+          ? pad.points?.map((point) => `${point.x}:${point.y}`).join(",")
+          : "no-points"
       return [
         pad.kind,
         pad.shape,
@@ -626,6 +596,7 @@ const geometrySignature = (preview: FootprintPreview) =>
         pad.width,
         pad.height,
         pad.rotation,
+        pointSignature,
         holeSignature,
       ]
         .map(String)
@@ -641,6 +612,33 @@ const padShapeSignature = (preview: FootprintPreview) =>
 
 const areClose = (left: number, right: number) =>
   Math.abs(left - right) <= 0.00001
+
+const areSamePoint = (
+  left: { x: number; y: number },
+  right: { x: number; y: number },
+) => areClose(left.x, right.x) && areClose(left.y, right.y)
+
+const haveSamePolygon = (left: PreviewPad, right: PreviewPad) => {
+  if (left.shape !== "polygon" && right.shape !== "polygon") return true
+  if (left.shape !== "polygon" || right.shape !== "polygon") return false
+  const leftPoints = getPolygonWorldPoints(left)
+  const rightPoints = getPolygonWorldPoints(right)
+  if (leftPoints.length !== rightPoints.length) return false
+
+  const matchesFrom = (startIndex: number, direction: 1 | -1) =>
+    leftPoints.every((leftPoint, index) => {
+      const rightIndex =
+        (startIndex + direction * index + rightPoints.length) %
+        rightPoints.length
+      return areSamePoint(leftPoint, rightPoints[rightIndex])
+    })
+
+  return rightPoints.some(
+    (rightPoint, startIndex) =>
+      areSamePoint(leftPoints[0], rightPoint) &&
+      (matchesFrom(startIndex, 1) || matchesFrom(startIndex, -1)),
+  )
+}
 
 const haveSameOrientedPads = (
   left: FootprintPreview,
@@ -671,6 +669,7 @@ const haveSameOrientedPads = (
       areClose(leftPad.y, rightPad.y) &&
       areClose(leftSize.width, rightSize.width) &&
       areClose(leftSize.height, rightSize.height) &&
+      haveSamePolygon(leftPad, rightPad) &&
       holesMatch
     )
   })

@@ -1,15 +1,17 @@
+import { getBoundsCenter, isPointInsidePolygon } from "@tscircuit/math-utils"
 import type { FootprintPreview, PreviewPad } from "./circuit-json-preview.js"
+import {
+  type Bounds,
+  getFootprintBounds,
+  type PreviewShape,
+  rotatePoint,
+  toRadians,
+} from "./preview-geometry.js"
+
+export type { Bounds, PreviewShape } from "./preview-geometry.js"
+export { getFootprintBounds } from "./preview-geometry.js"
 
 const DEFAULT_GRID_SIZE = 320
-
-export interface Bounds {
-  height: number
-  maxX: number
-  maxY: number
-  minX: number
-  minY: number
-  width: number
-}
 
 export interface CopperComparisonSummary {
   copperIntersectionOverUnion: number
@@ -29,11 +31,6 @@ export interface RasterComparison {
   rightOnlyRatio: number
 }
 
-export type PreviewShape = Pick<
-  PreviewPad,
-  "cornerRadius" | "height" | "rotation" | "shape" | "width" | "x" | "y"
->
-
 interface RasterizedShapes {
   coverageLeft: number
   coverageRight: number
@@ -41,72 +38,6 @@ interface RasterizedShapes {
   leftOnlyRatio: number
   occupancy?: Uint8Array
   rightOnlyRatio: number
-}
-
-const toRadians = (degrees: number) => (degrees * Math.PI) / 180
-
-const rotatePoint = (x: number, y: number, radians: number) => ({
-  x: x * Math.cos(radians) - y * Math.sin(radians),
-  y: x * Math.sin(radians) + y * Math.cos(radians),
-})
-
-const getShapeBounds = (shape: PreviewShape): Bounds => {
-  const halfWidth = shape.width / 2
-  const halfHeight = shape.height / 2
-  const radians = toRadians(shape.rotation)
-  const corners = [
-    rotatePoint(-halfWidth, -halfHeight, radians),
-    rotatePoint(halfWidth, -halfHeight, radians),
-    rotatePoint(halfWidth, halfHeight, radians),
-    rotatePoint(-halfWidth, halfHeight, radians),
-  ].map((corner) => ({
-    x: corner.x + shape.x,
-    y: corner.y + shape.y,
-  }))
-
-  const xs = corners.map((corner) => corner.x)
-  const ys = corners.map((corner) => corner.y)
-  const minX = Math.min(...xs)
-  const maxX = Math.max(...xs)
-  const minY = Math.min(...ys)
-  const maxY = Math.max(...ys)
-
-  return {
-    height: maxY - minY,
-    maxX,
-    maxY,
-    minX,
-    minY,
-    width: maxX - minX,
-  }
-}
-
-export const getFootprintBounds = (shapes: readonly PreviewShape[]): Bounds => {
-  if (!shapes.length) {
-    return {
-      height: 1,
-      maxX: 0.5,
-      maxY: 0.5,
-      minX: -0.5,
-      minY: -0.5,
-      width: 1,
-    }
-  }
-
-  const bounds = shapes.map(getShapeBounds)
-  const minX = Math.min(...bounds.map((bound) => bound.minX))
-  const minY = Math.min(...bounds.map((bound) => bound.minY))
-  const maxX = Math.max(...bounds.map((bound) => bound.maxX))
-  const maxY = Math.max(...bounds.map((bound) => bound.maxY))
-
-  return {
-    height: maxY - minY,
-    maxX,
-    maxY,
-    minX,
-    minY,
-    width: maxX - minX,
-  }
 }
 
 const addPadding = (bounds: Bounds): Bounds => {
@@ -138,9 +69,8 @@ const translateFootprint = (
 
 const centerFootprint = (footprint: FootprintPreview): FootprintPreview => {
   const bounds = getFootprintBounds(footprint.pads)
-  const centerX = (bounds.minX + bounds.maxX) / 2
-  const centerY = (bounds.minY + bounds.maxY) / 2
-  return translateFootprint(footprint, -centerX, -centerY)
+  const center = getBoundsCenter(bounds)
+  return translateFootprint(footprint, -center.x, -center.y)
 }
 
 const getHoleShapes = (pads: readonly PreviewPad[]): PreviewShape[] =>
@@ -164,6 +94,13 @@ const pointInShape = (x: number, y: number, shape: PreviewShape) => {
   const local = rotatePoint(dx, dy, -toRadians(shape.rotation))
   const halfWidth = shape.width / 2
   const halfHeight = shape.height / 2
+
+  if (shape.shape === "polygon") {
+    if (!shape.points || shape.points.length < 3) {
+      throw new Error("Polygon preview shapes require at least three points")
+    }
+    return isPointInsidePolygon(local, shape.points)
+  }
 
   if (shape.shape === "circle") {
     return Math.hypot(local.x, local.y) <= Math.min(halfWidth, halfHeight)

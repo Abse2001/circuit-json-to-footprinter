@@ -1,7 +1,13 @@
 import { fp } from "@tscircuit/footprinter"
+import {
+  getBoundsCenter,
+  getBoundsFromPoints,
+  type Point,
+} from "@tscircuit/math-utils"
 import type { AnyCircuitElement } from "circuit-json"
+import { getPolygonArea } from "./preview-geometry.js"
 
-export type PreviewPadShape = "circle" | "pill" | "rect"
+export type PreviewPadShape = "circle" | "pill" | "polygon" | "rect"
 export type PreviewPadKind = "plated-hole" | "smt"
 
 export interface PreviewHole {
@@ -20,6 +26,7 @@ export interface PreviewPad {
   id: string
   kind: PreviewPadKind
   layer: string
+  points?: Point[]
   portHints: string[]
   rotation: number
   shape: PreviewPadShape
@@ -156,6 +163,87 @@ const getPlatedHoleGeometry = (
   }
 }
 
+const parsePolygonPoints = (value: unknown, elementName: string) => {
+  if (!Array.isArray(value) || value.length < 3) {
+    throw new Error(`${elementName} must contain at least three points`)
+  }
+
+  const points = value.map((rawPoint) => {
+    if (!rawPoint || typeof rawPoint !== "object") {
+      throw new Error(`${elementName} points must contain finite x/y values`)
+    }
+    const point = rawPoint as Record<string, unknown>
+    const x = toNumber(point.x, Number.NaN)
+    const y = toNumber(point.y, Number.NaN)
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      throw new Error(`${elementName} points must contain finite x/y values`)
+    }
+    return { x, y }
+  })
+  if (getPolygonArea(points) <= 1e-12) {
+    throw new Error(`${elementName} must enclose a non-zero area`)
+  }
+  return points
+}
+
+const getPolygonSmtPadGeometry = (element: CircuitElement) => {
+  const absolutePoints = parsePolygonPoints(
+    element.points,
+    "Polygon PCB SMT pads",
+  )
+  const bounds = getBoundsFromPoints(absolutePoints)
+  if (!bounds) {
+    throw new Error("Polygon PCB SMT pads must contain at least three points")
+  }
+  const { x, y } = getBoundsCenter(bounds)
+
+  return {
+    height: bounds.maxY - bounds.minY,
+    points: absolutePoints.map((point) => ({
+      x: point.x - x,
+      y: point.y - y,
+    })),
+    width: bounds.maxX - bounds.minX,
+    x,
+    y,
+  }
+}
+
+const getSmtPadMetadata = (element: CircuitElement, index: number) => ({
+  id: String(element.pcb_smtpad_id ?? `pcb_smtpad_${index + 1}`),
+  kind: "smt" as const,
+  layer: String(element.layer ?? "top"),
+  portHints: Array.isArray(element.port_hints)
+    ? element.port_hints.map((hint) => normalizePortHint(String(hint)))
+    : [],
+})
+
+const parseSmtPad = (element: CircuitElement, index: number): PreviewPad => {
+  const metadata = getSmtPadMetadata(element, index)
+  if (element.shape === "polygon") {
+    return {
+      ...metadata,
+      ...getPolygonSmtPadGeometry(element),
+      rotation: 0,
+      shape: "polygon",
+    }
+  }
+
+  const diameter = toNumber(element.radius) * 2
+  const width = toNumber(element.width, diameter)
+  const height = toNumber(element.height, width)
+  return {
+    ...metadata,
+    cornerRadius: getCornerRadius(element, width, height),
+    height,
+    rotation: toNumber(element.ccw_rotation ?? element.rotation),
+    shape: normalizeShape(element.shape, width, height),
+    width,
+    x: toNumber(element.x),
+    y: toNumber(element.y),
+  }
+}
+
 export const circuitJsonToPreview = (
   circuitJson: readonly AnyCircuitElement[],
   options: CircuitJsonPreviewOptions = {},
@@ -163,26 +251,7 @@ export const circuitJsonToPreview = (
   const pads = circuitJson.flatMap((rawElement, index): PreviewPad[] => {
     const element = rawElement as CircuitElement
     if (element.type === "pcb_smtpad") {
-      const diameter = toNumber(element.radius) * 2
-      const width = toNumber(element.width, diameter)
-      const height = toNumber(element.height, width)
-      return [
-        {
-          cornerRadius: getCornerRadius(element, width, height),
-          height,
-          id: String(element.pcb_smtpad_id ?? `pcb_smtpad_${index + 1}`),
-          kind: "smt",
-          layer: String(element.layer ?? "top"),
-          portHints: Array.isArray(element.port_hints)
-            ? element.port_hints.map((hint) => normalizePortHint(String(hint)))
-            : [],
-          rotation: toNumber(element.ccw_rotation ?? element.rotation),
-          shape: normalizeShape(element.shape, width, height),
-          width,
-          x: toNumber(element.x),
-          y: toNumber(element.y),
-        },
-      ]
+      return [parseSmtPad(element, index)]
     }
     if (element.type === "pcb_plated_hole") {
       const { height, rotation, shape, width } =
