@@ -1,28 +1,15 @@
 import type { AnyCircuitElement } from "circuit-json"
-import { circuitJsonToPreview } from "./circuit-json-preview.js"
 import {
   discoverFootprinterString,
   type FootprinterDiscoveryResult,
 } from "./discover-footprinter.js"
+import { circuitJsonToFootprint } from "./footprint.js"
 
-export type {
-  CircuitJsonPreviewOptions,
-  FootprintPreview,
-  PreviewHole,
-  PreviewPad,
-  PreviewPadKind,
-  PreviewPadShape,
-} from "./circuit-json-preview.js"
-export {
-  circuitJsonToPreview,
-  footprinterStringToPreview,
-} from "./circuit-json-preview.js"
 export {
   type Bounds,
   type CopperComparisonSummary,
   compareFootprints,
   getFootprintBounds,
-  type PreviewShape,
   type RasterComparison,
   summarizeCopperComparison,
 } from "./compare-copper.js"
@@ -30,6 +17,14 @@ export type {
   FootprinterDiscoveryCandidate,
   FootprinterDiscoveryResult,
 } from "./discover-footprinter.js"
+export type {
+  CircuitJsonToFootprintOptions,
+  Footprint,
+} from "./footprint.js"
+export {
+  circuitJsonToFootprint,
+  footprinterStringToFootprint,
+} from "./footprint.js"
 
 export interface CircuitJsonToFootprinterOptions {
   maxCandidates?: number
@@ -42,6 +37,6 @@ export const circuitJsonToFootprinter = (
   circuitJson: readonly AnyCircuitElement[],
   options: CircuitJsonToFootprinterOptions = {},
 ): FootprinterDiscoveryResult => {
-  const target = circuitJsonToPreview(circuitJson, options)
+  const target = circuitJsonToFootprint(circuitJson, options)
   return discoverFootprinterString(target, options.maxCandidates)
 }

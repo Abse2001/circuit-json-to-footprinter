@@ -1,15 +1,17 @@
 import { getBoundsCenter, isPointInsidePolygon } from "@tscircuit/math-utils"
-import type { FootprintPreview, PreviewPad } from "./circuit-json-preview.js"
+import type { Footprint } from "./footprint.js"
 import {
   type Bounds,
-  getFootprintBounds,
-  type PreviewShape,
+  getShapeListBounds,
+  getTransformedPcbHoleGeometry,
+  getTransformedPcbPadGeometry,
   rotatePoint,
+  type ShapeGeometry,
   toRadians,
-} from "./preview-geometry.js"
+} from "./footprint-geometry.js"
 
-export type { Bounds, PreviewShape } from "./preview-geometry.js"
-export { getFootprintBounds } from "./preview-geometry.js"
+export type { Bounds } from "./footprint-geometry.js"
+export { getFootprintBounds } from "./footprint-geometry.js"
 
 const DEFAULT_GRID_SIZE = 320
 
@@ -24,8 +26,8 @@ export interface RasterComparison {
   gridSize: number
   iou: number
   leftOnlyRatio: number
-  normalizedLeft: FootprintPreview
-  normalizedRight: FootprintPreview
+  normalizedLeft: Footprint
+  normalizedRight: Footprint
   occupancy: Uint8Array
   padCountMatch: boolean
   rightOnlyRatio: number
@@ -55,40 +57,44 @@ const addPadding = (bounds: Bounds): Bounds => {
 }
 
 const translateFootprint = (
-  footprint: FootprintPreview,
+  footprint: Footprint,
   deltaX: number,
   deltaY: number,
-): FootprintPreview => ({
-  ...footprint,
-  pads: footprint.pads.map((pad) => ({
-    ...pad,
-    x: pad.x + deltaX,
-    y: pad.y + deltaY,
-  })),
-})
+): Footprint => {
+  return {
+    holes: footprint.holes,
+    pads: footprint.pads,
+    rotation: footprint.rotation,
+    sourceHints: footprint.sourceHints,
+    subtitle: footprint.subtitle,
+    title: footprint.title,
+    x: (footprint.x ?? 0) + deltaX,
+    y: (footprint.y ?? 0) + deltaY,
+  }
+}
 
-const centerFootprint = (footprint: FootprintPreview): FootprintPreview => {
-  const bounds = getFootprintBounds(footprint.pads)
+const centerFootprint = (footprint: Footprint): Footprint => {
+  const bounds = getShapeListBounds(getCopperShapes(footprint))
   const center = getBoundsCenter(bounds)
   return translateFootprint(footprint, -center.x, -center.y)
 }
 
-const getHoleShapes = (pads: readonly PreviewPad[]): PreviewShape[] =>
-  pads.flatMap((pad) => {
-    if (!pad.hole) return []
-    return [
-      {
-        height: pad.hole.height,
-        rotation: pad.hole.rotation,
-        shape: pad.hole.shape,
-        width: pad.hole.width,
-        x: pad.x + pad.hole.offsetX,
-        y: pad.y + pad.hole.offsetY,
-      },
-    ]
-  })
+const getCopperShapes = (footprint: Footprint): ShapeGeometry[] =>
+  footprint.pads.map(
+    (pad) => getTransformedPcbPadGeometry(pad, footprint).copper,
+  )
 
-const pointInShape = (x: number, y: number, shape: PreviewShape) => {
+const getHoleShapes = (footprint: Footprint): ShapeGeometry[] => [
+  ...footprint.pads.flatMap((pad) => {
+    const drill = getTransformedPcbPadGeometry(pad, footprint).drill
+    return drill ? [drill] : []
+  }),
+  ...footprint.holes.map((hole) =>
+    getTransformedPcbHoleGeometry(hole, footprint),
+  ),
+]
+
+const pointInShape = (x: number, y: number, shape: ShapeGeometry) => {
   const dx = x - shape.x
   const dy = y - shape.y
   const local = rotatePoint(dx, dy, -toRadians(shape.rotation))
@@ -97,13 +103,22 @@ const pointInShape = (x: number, y: number, shape: PreviewShape) => {
 
   if (shape.shape === "polygon") {
     if (!shape.points || shape.points.length < 3) {
-      throw new Error("Polygon preview shapes require at least three points")
+      throw new Error("Polygon footprint shapes require at least three points")
     }
     return isPointInsidePolygon(local, shape.points)
   }
 
   if (shape.shape === "circle") {
     return Math.hypot(local.x, local.y) <= Math.min(halfWidth, halfHeight)
+  }
+
+  if (shape.shape === "ellipse") {
+    if (halfWidth === 0 || halfHeight === 0) return false
+    return (
+      (local.x * local.x) / (halfWidth * halfWidth) +
+        (local.y * local.y) / (halfHeight * halfHeight) <=
+      1
+    )
   }
 
   if (shape.shape === "rect") {
@@ -174,19 +189,19 @@ const mergeBounds = (left: Bounds, right: Bounds): Bounds => {
 }
 
 const getComparisonBounds = (
-  left: readonly PreviewShape[],
-  right: readonly PreviewShape[],
+  left: readonly ShapeGeometry[],
+  right: readonly ShapeGeometry[],
 ) => {
-  if (!left.length) return addPadding(getFootprintBounds(right))
-  if (!right.length) return addPadding(getFootprintBounds(left))
+  if (!left.length) return addPadding(getShapeListBounds(right))
+  if (!right.length) return addPadding(getShapeListBounds(left))
   return addPadding(
-    mergeBounds(getFootprintBounds(left), getFootprintBounds(right)),
+    mergeBounds(getShapeListBounds(left), getShapeListBounds(right)),
   )
 }
 
 const rasterizeShapes = (
-  left: readonly PreviewShape[],
-  right: readonly PreviewShape[],
+  left: readonly ShapeGeometry[],
+  right: readonly ShapeGeometry[],
   gridSize: number,
   includeOccupancy: boolean,
 ): RasterizedShapes => {
@@ -239,16 +254,16 @@ const rasterizeShapes = (
 }
 
 const compareNormalizedFootprints = (
-  left: FootprintPreview,
-  right: FootprintPreview,
+  left: Footprint,
+  right: Footprint,
   gridSize: number,
   includeOccupancy: boolean,
 ) => {
   const normalizedLeft = centerFootprint(left)
   const normalizedRight = centerFootprint(right)
   const comparison = rasterizeShapes(
-    normalizedLeft.pads,
-    normalizedRight.pads,
+    getCopperShapes(normalizedLeft),
+    getCopperShapes(normalizedRight),
     gridSize,
     includeOccupancy,
   )
@@ -257,8 +272,8 @@ const compareNormalizedFootprints = (
 }
 
 export const compareFootprints = (
-  left: FootprintPreview,
-  right: FootprintPreview,
+  left: Footprint,
+  right: Footprint,
   gridSize = DEFAULT_GRID_SIZE,
 ): RasterComparison => {
   const { comparison, normalizedLeft, normalizedRight } =
@@ -279,14 +294,14 @@ export const compareFootprints = (
 }
 
 export const summarizeCopperComparison = (
-  left: FootprintPreview,
-  right: FootprintPreview,
+  left: Footprint,
+  right: Footprint,
   gridSize = DEFAULT_GRID_SIZE,
 ): CopperComparisonSummary => {
   const { comparison, normalizedLeft, normalizedRight } =
     compareNormalizedFootprints(left, right, gridSize, false)
-  const leftHoles = getHoleShapes(normalizedLeft.pads)
-  const rightHoles = getHoleShapes(normalizedRight.pads)
+  const leftHoles = getHoleShapes(normalizedLeft)
+  const rightHoles = getHoleShapes(normalizedRight)
   const holeIntersectionOverUnion =
     leftHoles.length === 0 && rightHoles.length === 0
       ? 1
