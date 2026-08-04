@@ -79,6 +79,7 @@ interface TargetAnalysis {
   bounds: Bounds
   dpak?: DpakAnalysis
   fpc?: FpcAnalysis
+  jstThroughHole?: JstThroughHoleAnalysis
   jstSmd?: JstSmdAnalysis
   gridColumns: number
   gridRows: number
@@ -88,6 +89,7 @@ interface TargetAnalysis {
   lgaPadWidth: number
   perimeterPadCount: number
   platedHoleCount: number
+  potentiometer?: PotentiometerAnalysis
   quadSidePadCounts: QuadSidePadCounts
   rj45?: Rj45Analysis
   smdPushButton?: SmdPushButtonAnalysis
@@ -178,6 +180,21 @@ interface JstSmdAnalysis {
   padPitch: number
   padWidth: number
   pinCount: number
+}
+
+interface JstThroughHoleAnalysis {
+  id: number
+  padLength: number
+  padPitch: number
+  padWidth: number
+  pinCount: number
+}
+
+interface PotentiometerAnalysis {
+  h: number
+  id: number
+  od: number
+  p: number
 }
 
 interface SmdPushButtonAnalysis {
@@ -758,6 +775,161 @@ const analyzeJstSmd = (target: Footprint) => {
     analyzeJstSmdAxis(target, "y"),
   ].filter((analysis): analysis is JstSmdAnalysis => analysis !== undefined)
   return analyses.toSorted((left, right) => left.fitScore - right.fitScore)[0]
+}
+
+const analyzeJstThroughHole = (
+  target: Footprint,
+): JstThroughHoleAnalysis | undefined => {
+  const pads = getPadGeometries(target)
+  if (
+    pads.length < 2 ||
+    pads.length > 16 ||
+    pads.some(
+      ({ copper, drill, element }) =>
+        element.type !== "pcb_plated_hole" ||
+        !drill ||
+        (copper.shape !== "rect" && copper.shape !== "pill"),
+    ) ||
+    pads.filter(({ copper }) => copper.shape === "rect").length !== 1 ||
+    pads.filter(({ copper }) => copper.shape === "pill").length !==
+      pads.length - 1
+  ) {
+    return undefined
+  }
+
+  const xSpread =
+    Math.max(...pads.map(({ copper }) => copper.x)) -
+    Math.min(...pads.map(({ copper }) => copper.x))
+  const ySpread =
+    Math.max(...pads.map(({ copper }) => copper.y)) -
+    Math.min(...pads.map(({ copper }) => copper.y))
+  const alongAxis = xSpread >= ySpread ? "x" : "y"
+  const acrossAxis = alongAxis === "x" ? "y" : "x"
+  const entries = pads
+    .map((pad) => ({
+      across: pad.copper[acrossAxis],
+      along: pad.copper[alongAxis],
+      bounds: getPadBounds(pad.copper),
+      pad,
+    }))
+    .toSorted((left, right) => left.along - right.along)
+  const padWidth = median(
+    entries.map(({ bounds }) =>
+      alongAxis === "x" ? bounds.width : bounds.height,
+    ),
+  )
+  const padLength = median(
+    entries.map(({ bounds }) =>
+      alongAxis === "x" ? bounds.height : bounds.width,
+    ),
+  )
+  const tolerance = Math.max(0.03, Math.min(padWidth, padLength) * 0.08)
+  const rowCenter = median(entries.map(({ across }) => across))
+  if (
+    entries.some(
+      ({ across, bounds }) =>
+        Math.abs(across - rowCenter) > tolerance ||
+        Math.abs(
+          (alongAxis === "x" ? bounds.width : bounds.height) - padWidth,
+        ) > tolerance ||
+        Math.abs(
+          (alongAxis === "x" ? bounds.height : bounds.width) - padLength,
+        ) > tolerance,
+    )
+  ) {
+    return undefined
+  }
+
+  const differences = entries
+    .slice(1)
+    .map((entry, index) => entry.along - entries[index]!.along)
+  const padPitch = median(differences)
+  if (
+    padPitch <= tolerance ||
+    differences.some(
+      (difference) => Math.abs(difference - padPitch) > tolerance,
+    )
+  ) {
+    return undefined
+  }
+
+  return {
+    id: median(
+      entries.map(({ pad }) => Math.min(pad.drill!.width, pad.drill!.height)),
+    ),
+    padLength,
+    padPitch,
+    padWidth,
+    pinCount: pads.length,
+  }
+}
+
+const analyzePotentiometer = (
+  target: Footprint,
+): PotentiometerAnalysis | undefined => {
+  const description = `${target.title} ${target.subtitle} ${
+    target.sourceHints?.join(" ") ?? ""
+  }`.toLowerCase()
+  if (!/(?:potentiometer|trimmer|\b3362)/.test(description)) return undefined
+
+  const pads = getPadGeometries(target)
+  if (
+    pads.length !== 3 ||
+    pads.some(
+      ({ copper, drill, element }) =>
+        element.type !== "pcb_plated_hole" ||
+        copper.shape !== "circle" ||
+        drill?.shape !== "circle",
+    )
+  ) {
+    return undefined
+  }
+
+  const pairs = [
+    [0, 1],
+    [0, 2],
+    [1, 2],
+  ] as const
+  const [firstIndex, secondIndex] = pairs.toSorted(([a1, a2], [b1, b2]) => {
+    const a = pads[a1]!.copper
+    const b = pads[a2]!.copper
+    const c = pads[b1]!.copper
+    const d = pads[b2]!.copper
+    return Math.hypot(d.x - c.x, d.y - c.y) - Math.hypot(b.x - a.x, b.y - a.y)
+  })[0]!
+  const thirdIndex = [0, 1, 2].find(
+    (index) => index !== firstIndex && index !== secondIndex,
+  )!
+  const first = pads[firstIndex]!.copper
+  const second = pads[secondIndex]!.copper
+  const third = pads[thirdIndex]!.copper
+  const baseDx = second.x - first.x
+  const baseDy = second.y - first.y
+  const baseLength = Math.hypot(baseDx, baseDy)
+  if (baseLength <= 0.1) return undefined
+  const midpoint = {
+    x: (first.x + second.x) / 2,
+    y: (first.y + second.y) / 2,
+  }
+  const alongOffset =
+    ((third.x - midpoint.x) * baseDx + (third.y - midpoint.y) * baseDy) /
+    baseLength
+  const height =
+    Math.abs(baseDx * (third.y - first.y) - baseDy * (third.x - first.x)) /
+    baseLength
+  if (
+    height <= 0.1 ||
+    Math.abs(alongOffset) > Math.max(0.05, baseLength * 0.05)
+  ) {
+    return undefined
+  }
+
+  return {
+    h: height,
+    id: median(pads.map(({ drill }) => drill!.width)),
+    od: median(pads.map(({ copper }) => copper.width)),
+    p: baseLength / 2,
+  }
 }
 
 interface LatticeAxisFit {
@@ -1803,6 +1975,7 @@ const analyzeTarget = (target: Footprint): TargetAnalysis => {
     bounds,
     dpak,
     fpc: analyzeFpc(target),
+    jstThroughHole: analyzeJstThroughHole(target),
     jstSmd: analyzeJstSmd(target),
     gridColumns: xCoordinates.length,
     gridRows: yCoordinates.length,
@@ -1832,6 +2005,7 @@ const analyzeTarget = (target: Footprint): TargetAnalysis => {
       : median(topBottomEdgePads.map(({ bounds: bound }) => bound.width)),
     perimeterPadCount: sidePads.length,
     platedHoleCount,
+    potentiometer: analyzePotentiometer(target),
     quadSidePadCounts,
     rj45,
     smdPushButton: analyzeSmdPushButton(target),
@@ -2083,11 +2257,14 @@ const roundToFiveMicrometers = (value: number) =>
 const roundToTenMicrometers = (value: number) =>
   Number((Math.round(value * 100) / 100).toFixed(2))
 
-const roundOptimizedParameter = (parameter: NumericParameter, value: number) =>
+const usesFiveMicrometerPrecision = (parameter: NumericParameter) =>
   parameter === "p" ||
   parameter === "px" ||
   parameter === "py" ||
   parameter === "pad"
+
+const roundOptimizedParameter = (parameter: NumericParameter, value: number) =>
+  usesFiveMicrometerPrecision(parameter)
     ? roundToFiveMicrometers(value)
     : roundToTenMicrometers(value)
 
@@ -2116,13 +2293,9 @@ const buildParameterizedString = (
   const suffix = NUMERIC_PARAMETERS.flatMap((parameter) => {
     const value = parameters[parameter]
     if (value === undefined) return []
-    const formattedValue =
-      parameter === "p" ||
-      parameter === "px" ||
-      parameter === "py" ||
-      parameter === "pad"
-        ? formatPitchLength(value)
-        : formatLength(value)
+    const formattedValue = usesFiveMicrometerPrecision(parameter)
+      ? formatPitchLength(value)
+      : formatLength(value)
     return [`${parameter}${formattedValue}`]
   }).join("_")
   return suffix ? `${seed}_${suffix}` : seed
@@ -2333,6 +2506,8 @@ const getPreferredFamilies = (analysis: TargetAnalysis) => {
   if (analysis.smdPushButton) return new Set(["smdpushbutton"])
   if (analysis.smdSlideSwitch) return new Set(["smdslideswitch"])
   if (analysis.jstSmd) return new Set(["jst"])
+  if (analysis.jstThroughHole) return new Set(["jst"])
+  if (analysis.potentiometer) return new Set(["potentiometer"])
   if (analysis.fpc) return new Set(["fpc"])
   if (analysis.rj45) return new Set(["rj45"])
   if (analysis.platedHoleCount > analysis.perimeterPadCount / 2) {
@@ -2604,20 +2779,31 @@ const getTwoSidedDfnSeed = (target: Footprint) => {
       bounds.map((bound) => bound[alongAxis === "x" ? "width" : "height"]),
     )
     const tolerance = Math.max(0.01, Math.min(padLength, padWidth) * 0.1)
-    if (
-      bounds.some(
-        (bound) =>
-          Math.abs(bound[crossAxis === "x" ? "width" : "height"] - padLength) >
-            tolerance ||
-          Math.abs(bound[alongAxis === "x" ? "width" : "height"] - padWidth) >
-            tolerance,
-      )
-    ) {
+    const padLengthOutliers = bounds.filter(
+      (bound) =>
+        Math.abs(bound[crossAxis === "x" ? "width" : "height"] - padLength) >
+        tolerance,
+    ).length
+    const hasPadWidthOutlier = bounds.some(
+      (bound) =>
+        Math.abs(bound[alongAxis === "x" ? "width" : "height"] - padWidth) >
+        tolerance,
+    )
+    // Pin 1 is sometimes deliberately longer than the remaining pads. The
+    // family can still reproduce the shared pad geometry accurately.
+    if (padLengthOutliers > 1 || hasPadWidthOutlier) {
       continue
     }
 
+    const regularLengthPads = pads.filter((_, index) => {
+      const bound = bounds[index]!
+      return (
+        Math.abs(bound[crossAxis === "x" ? "width" : "height"] - padLength) <=
+        tolerance
+      )
+    })
     const crossCoordinates = clusterCoordinates(
-      pads.map(({ copper }) => copper[crossAxis]),
+      regularLengthPads.map(({ copper }) => copper[crossAxis]),
       tolerance,
     )
     const alongCoordinates = clusterCoordinates(
@@ -2634,10 +2820,15 @@ const getTwoSidedDfnSeed = (target: Footprint) => {
     if (
       crossCoordinates.some(
         (crossCoordinate) =>
-          pads.filter(
-            ({ copper }) =>
-              Math.abs(copper[crossAxis] - crossCoordinate) <= tolerance,
-          ).length !==
+          pads.filter(({ copper }, index) => {
+            const bound = bounds[index]!
+            const length = bound[crossAxis === "x" ? "width" : "height"]
+            const centerTolerance =
+              tolerance + Math.max(0, Math.abs(length - padLength) / 2)
+            return (
+              Math.abs(copper[crossAxis] - crossCoordinate) <= centerTolerance
+            )
+          }).length !==
           pads.length / 2,
       )
     ) {
@@ -2663,6 +2854,67 @@ const getTwoSidedDfnSeed = (target: Footprint) => {
   return undefined
 }
 
+const getTwoLeadThermalQfnSeed = (
+  target: Footprint,
+  analysis: TargetAnalysis,
+) => {
+  if (!analysis.thermalPad) return undefined
+
+  const pads = getPadGeometries(target)
+  if (
+    pads.length !== 3 ||
+    pads.some(
+      ({ copper, drill, element }) =>
+        element.type !== "pcb_smtpad" || drill || copper.shape !== "rect",
+    )
+  ) {
+    return undefined
+  }
+
+  const entries = pads
+    .map((pad) => {
+      const bounds = getPadBounds(pad.copper)
+      return { area: bounds.width * bounds.height, bounds, pad }
+    })
+    .toSorted((left, right) => right.area - left.area)
+  const thermalPad = entries[0]!
+  const leads = entries.slice(1)
+  if (thermalPad.area <= Math.max(...leads.map(({ area }) => area)) * 2) {
+    return undefined
+  }
+
+  const dx = Math.abs(leads[1]!.pad.copper.x - leads[0]!.pad.copper.x)
+  const dy = Math.abs(leads[1]!.pad.copper.y - leads[0]!.pad.copper.y)
+  const separatedVertically = dy >= dx
+  const separation = Math.max(dx, dy)
+  const crossOffset = Math.min(dx, dy)
+  const leadWidth = median(leads.map(({ bounds }) => bounds.width))
+  const leadHeight = median(leads.map(({ bounds }) => bounds.height))
+  const padWidth = separatedVertically ? leadHeight : leadWidth
+  const padLength = separatedVertically ? leadWidth : leadHeight
+  if (
+    separation <= 0.05 ||
+    crossOffset > Math.max(0.02, Math.min(leadWidth, leadHeight) * 0.1)
+  ) {
+    return undefined
+  }
+
+  const sourceThermalPadWidth = separatedVertically
+    ? thermalPad.bounds.width
+    : thermalPad.bounds.height
+  const sourceThermalPadHeight = separatedVertically
+    ? thermalPad.bounds.height
+    : thermalPad.bounds.width
+  return [
+    "qfn2",
+    `thermalpad${formatPreciseLength(sourceThermalPadWidth)}x${formatPreciseLength(sourceThermalPadHeight)}`,
+    `p${formatPreciseLength(separation * 2)}`,
+    `w${formatPreciseLength(padLength + 0.2)}`,
+    `pw${formatPreciseLength(padWidth)}`,
+    `pl${formatPreciseLength(padLength)}`,
+  ].join("_")
+}
+
 const generateSeeds = (target: Footprint, analysis: TargetAnalysis) => {
   const padCount = target.pads.length
   const seeds = new Set<string>()
@@ -2679,6 +2931,9 @@ const generateSeeds = (target: Footprint, analysis: TargetAnalysis) => {
 
   const twoSidedDfnSeed = getTwoSidedDfnSeed(target)
   if (twoSidedDfnSeed) seeds.add(twoSidedDfnSeed)
+
+  const twoLeadThermalQfnSeed = getTwoLeadThermalQfnSeed(target, analysis)
+  if (twoLeadThermalQfnSeed) seeds.add(twoLeadThermalQfnSeed)
 
   if (analysis.dpak) {
     const { family, numberOfPads, p, pl, pw, span, tabh, tabw } = analysis.dpak
@@ -2718,6 +2973,34 @@ const generateSeeds = (target: Footprint, analysis: TargetAnalysis) => {
       `mpl${formatPreciseLength(mountingPadLength)}`,
     ]
     seeds.add(`jst${pinCount}_${[...flags, ...parameters].join("_")}`)
+  }
+
+  if (analysis.jstThroughHole) {
+    const { id, padLength, padPitch, padWidth, pinCount } =
+      analysis.jstThroughHole
+    seeds.add(
+      [
+        `jst${pinCount}`,
+        "zh",
+        `p${formatPreciseLength(padPitch)}`,
+        `pw${formatPreciseLength(padWidth)}`,
+        `pl${formatPreciseLength(padLength)}`,
+        `id${formatPreciseLength(id)}`,
+      ].join("_"),
+    )
+  }
+
+  if (analysis.potentiometer) {
+    const { h, id, od, p } = analysis.potentiometer
+    seeds.add(
+      [
+        "potentiometer",
+        `p${formatPreciseLength(p)}`,
+        `h${formatPreciseLength(h)}`,
+        `od${formatPreciseLength(od)}`,
+        `id${formatPreciseLength(id)}`,
+      ].join("_"),
+    )
   }
 
   if (analysis.smdSlideSwitch) {
@@ -3259,7 +3542,9 @@ const findActiveParameters = (
   // only make the result less readable.
   if (
     seed.family === "fpc" ||
-    (seed.family === "jst" && seed.footprinterString.includes("_smd"))
+    (seed.family === "jst" &&
+      (seed.footprinterString.includes("_smd") ||
+        seed.footprinterString.includes("_zh")))
   ) {
     return []
   }
