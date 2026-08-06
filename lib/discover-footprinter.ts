@@ -85,7 +85,6 @@ interface TargetAnalysis {
   gridRows: number
   heuristics: Record<NumericParameter, number>
   horizontalSidePadCount: number
-  led2835?: Led2835Analysis
   lgaPadLength: number
   lgaPadWidth: number
   perimeterPadCount: number
@@ -105,6 +104,7 @@ interface TargetAnalysis {
     yOffset: number
   }
   topology: Topology
+  twoPadSmd?: TwoPadSmdAnalysis
   verticalSidePadCount: number
 }
 
@@ -199,12 +199,12 @@ interface JstThroughHoleAnalysis {
   pinCount: number
 }
 
-interface Led2835Analysis {
-  p1w: number
-  p1x: number
-  p2w: number
-  p2x: number
-  ph: number
+interface TwoPadSmdAnalysis {
+  padHeight: number
+  pin1Offset: number
+  pin1Width: number
+  pin2Offset: number
+  pin2Width: number
 }
 
 interface PotentiometerAnalysis {
@@ -881,12 +881,7 @@ const analyzeJstThroughHole = (
   }
 }
 
-const analyzeLed2835 = (target: Footprint): Led2835Analysis | undefined => {
-  const description = `${target.title} ${target.subtitle} ${
-    target.sourceHints?.join(" ") ?? ""
-  }`.toLowerCase()
-  if (!description.includes("2835")) return undefined
-
+const analyzeTwoPadSmd = (target: Footprint): TwoPadSmdAnalysis | undefined => {
   const pads = getPadGeometries(target)
   if (
     pads.length !== 2 ||
@@ -931,11 +926,11 @@ const analyzeLed2835 = (target: Footprint): Led2835Analysis | undefined => {
   }
 
   return {
-    p1w: horizontal ? pin1Bounds.width : pin1Bounds.height,
-    p1x: pin1.copper[horizontal ? "x" : "y"] - center,
-    p2w: horizontal ? pin2Bounds.width : pin2Bounds.height,
-    p2x: pin2.copper[horizontal ? "x" : "y"] - center,
-    ph: median([pin1Height, pin2Height]),
+    padHeight: median([pin1Height, pin2Height]),
+    pin1Offset: pin1.copper[horizontal ? "x" : "y"] - center,
+    pin1Width: horizontal ? pin1Bounds.width : pin1Bounds.height,
+    pin2Offset: pin2.copper[horizontal ? "x" : "y"] - center,
+    pin2Width: horizontal ? pin2Bounds.width : pin2Bounds.height,
   }
 }
 
@@ -2091,7 +2086,6 @@ const analyzeTarget = (target: Footprint): TargetAnalysis => {
       quadSidePadCounts.left,
       quadSidePadCounts.right,
     ),
-    led2835: analyzeLed2835(target),
     lgaPadLength: leftRightEdgePads.length
       ? median(leftRightEdgePads.map(({ bounds: bound }) => bound.width))
       : median(topBottomEdgePads.map(({ bounds: bound }) => bound.height)),
@@ -2116,6 +2110,7 @@ const analyzeTarget = (target: Footprint): TargetAnalysis => {
         }
       : undefined,
     topology,
+    twoPadSmd: analyzeTwoPadSmd(target),
     usbCMidMount: getUsbCMidMountGeometry(target),
     verticalSidePadCount: Math.max(
       quadSidePadCounts.bottom,
@@ -2597,13 +2592,22 @@ const encodeOrientationInFootprinterString = (
   return null
 }
 
-const getPreferredFamilies = (analysis: TargetAnalysis) => {
+const isLed2835Target = (
+  target: Footprint,
+  analysis: TargetAnalysis,
+): analysis is TargetAnalysis & { twoPadSmd: TwoPadSmdAnalysis } =>
+  Boolean(analysis.twoPadSmd) &&
+  `${target.title} ${target.subtitle} ${target.sourceHints?.join(" ") ?? ""}`
+    .toLowerCase()
+    .includes("2835")
+
+const getPreferredFamilies = (target: Footprint, analysis: TargetAnalysis) => {
   if (analysis.dpak) return new Set([analysis.dpak.family])
   if (analysis.smdPushButton) return new Set(["smdpushbutton"])
   if (analysis.smdSlideSwitch) return new Set(["smdslideswitch"])
   if (analysis.jstSmd) return new Set(["jst"])
   if (analysis.jstThroughHole) return new Set(["jst"])
-  if (analysis.led2835) return new Set(["led2835"])
+  if (isLed2835Target(target, analysis)) return new Set(["led2835"])
   if (analysis.potentiometer) return new Set(["potentiometer"])
   if (analysis.fpc) return new Set(["fpc"])
   if (analysis.rj45) return new Set(["rj45"])
@@ -3079,16 +3083,17 @@ const generateSeeds = (target: Footprint, analysis: TargetAnalysis) => {
   const asymmetricQfnSeed = getAsymmetricQfnSeed(target, analysis)
   if (asymmetricQfnSeed) seeds.add(asymmetricQfnSeed)
 
-  if (analysis.led2835) {
-    const { p1w, p1x, p2w, p2x, ph } = analysis.led2835
+  if (isLed2835Target(target, analysis)) {
+    const { padHeight, pin1Offset, pin1Width, pin2Offset, pin2Width } =
+      analysis.twoPadSmd
     seeds.add(
       [
         "led2835",
-        `p1w${formatPreciseLength(p1w)}`,
-        `p2w${formatPreciseLength(p2w)}`,
-        `ph${formatPreciseLength(ph)}`,
-        `p1x${formatPreciseLength(p1x)}`,
-        `p2x${formatPreciseLength(p2x)}`,
+        `p1w${formatPreciseLength(pin1Width)}`,
+        `p2w${formatPreciseLength(pin2Width)}`,
+        `ph${formatPreciseLength(padHeight)}`,
+        `p1x${formatPreciseLength(pin1Offset)}`,
+        `p2x${formatPreciseLength(pin2Offset)}`,
       ].join("_"),
     )
   }
@@ -3650,7 +3655,7 @@ const selectSeedsToOptimize = (
     )
   }
 
-  const preferredFamilies = getPreferredFamilies(analysis)
+  const preferredFamilies = getPreferredFamilies(target, analysis)
   for (const family of preferredFamilies) {
     const candidate =
       (analysis.thermalPad
