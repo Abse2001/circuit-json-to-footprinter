@@ -2712,8 +2712,8 @@ const getAsymmetricQfnSeed = (target: Footprint, analysis: TargetAnalysis) => {
     `h${formatPreciseLength(analysis.heuristics.h)}`,
     `pw${formatPreciseLength(topBottomWidth)}`,
     `pl${formatPreciseLength(topBottomLength)}`,
-    `leftrightpadwidth${formatPreciseLength(leftRightWidth)}`,
-    `leftrightpadlength${formatPreciseLength(leftRightLength)}`,
+    `lrpw${formatPreciseLength(leftRightWidth)}`,
+    `lrpl${formatPreciseLength(leftRightLength)}`,
   ]
   const hasSquarePads = getPadGeometries(target).every(
     ({ copper }) => copper.shape === "rect" && !copper.cornerRadius,

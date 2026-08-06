@@ -64,8 +64,8 @@ test("recovers C128396 with its wider left and right UQFN pads", async () => {
   })
 
   expect(result.best?.family).toBe("qfn")
-  expect(result.best?.footprinterString).toContain("leftrightpadwidth0.3mm")
-  expect(result.best?.footprinterString).toContain("leftrightpadlength0.58mm")
+  expect(result.best?.footprinterString).toContain("lrpw0.3mm")
+  expect(result.best?.footprinterString).toContain("lrpl0.58mm")
   expect(result.best?.footprinterString).toContain("rounded0")
   expect(result.best?.copperIntersectionOverUnion).toBeGreaterThanOrEqual(0.999)
 }, 30_000)
