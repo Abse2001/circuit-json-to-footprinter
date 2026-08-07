@@ -90,6 +90,7 @@ interface TargetAnalysis {
   perimeterPadCount: number
   platedHoleCount: number
   potentiometer?: PotentiometerAnalysis
+  quadPadDimensions?: QuadPadDimensions
   quadSidePadCounts: QuadSidePadCounts
   rj45?: Rj45Analysis
   smdPushButton?: SmdPushButtonAnalysis
@@ -103,6 +104,7 @@ interface TargetAnalysis {
     yOffset: number
   }
   topology: Topology
+  twoPadSmd?: TwoPadSmdAnalysis
   verticalSidePadCount: number
 }
 
@@ -111,6 +113,13 @@ interface QuadSidePadCounts {
   top: number
   right: number
   bottom: number
+}
+
+interface QuadPadDimensions {
+  leftRightLength: number
+  leftRightWidth: number
+  topBottomLength: number
+  topBottomWidth: number
 }
 
 interface DpakAnalysis {
@@ -188,6 +197,14 @@ interface JstThroughHoleAnalysis {
   padPitch: number
   padWidth: number
   pinCount: number
+}
+
+interface TwoPadSmdAnalysis {
+  padHeight: number
+  pin1Offset: number
+  pin1Width: number
+  pin2Offset: number
+  pin2Width: number
 }
 
 interface PotentiometerAnalysis {
@@ -861,6 +878,59 @@ const analyzeJstThroughHole = (
     padPitch,
     padWidth,
     pinCount: pads.length,
+  }
+}
+
+const analyzeTwoPadSmd = (target: Footprint): TwoPadSmdAnalysis | undefined => {
+  const pads = getPadGeometries(target)
+  if (
+    pads.length !== 2 ||
+    pads.some(
+      ({ copper, drill, element }) =>
+        element.type !== "pcb_smtpad" || drill || copper.shape !== "rect",
+    )
+  ) {
+    return undefined
+  }
+
+  const getPin = (pinNumber: number) =>
+    pads.find(({ element }) =>
+      element.port_hints?.some((hint) => {
+        const normalizedHint = hint.trim().toLowerCase()
+        return (
+          normalizedHint === String(pinNumber) ||
+          normalizedHint === `pin${pinNumber}`
+        )
+      }),
+    )
+  const pin1 = getPin(1)
+  const pin2 = getPin(2)
+  if (!pin1 || !pin2) return undefined
+
+  const horizontal =
+    Math.abs(pin2.copper.x - pin1.copper.x) >=
+    Math.abs(pin2.copper.y - pin1.copper.y)
+  const pin1Bounds = getPadBounds(pin1.copper)
+  const pin2Bounds = getPadBounds(pin2.copper)
+  const center = horizontal
+    ? (Math.min(pin1Bounds.minX, pin2Bounds.minX) +
+        Math.max(pin1Bounds.maxX, pin2Bounds.maxX)) /
+      2
+    : (Math.min(pin1Bounds.minY, pin2Bounds.minY) +
+        Math.max(pin1Bounds.maxY, pin2Bounds.maxY)) /
+      2
+  const pin1Height = horizontal ? pin1Bounds.height : pin1Bounds.width
+  const pin2Height = horizontal ? pin2Bounds.height : pin2Bounds.width
+  if (Math.abs(pin1Height - pin2Height) > Math.max(0.03, pin1Height * 0.05)) {
+    return undefined
+  }
+
+  return {
+    padHeight: median([pin1Height, pin2Height]),
+    pin1Offset: pin1.copper[horizontal ? "x" : "y"] - center,
+    pin1Width: horizontal ? pin1Bounds.width : pin1Bounds.height,
+    pin2Offset: pin2.copper[horizontal ? "x" : "y"] - center,
+    pin2Width: horizontal ? pin2Bounds.width : pin2Bounds.height,
   }
 }
 
@@ -1908,6 +1978,25 @@ const analyzeTarget = (target: Footprint): TargetAnalysis => {
     right: rightSidePads.length,
     bottom: bottomSidePads.length,
   }
+  const leftRightSidePads = [...leftSidePads, ...rightSidePads]
+  const topBottomSidePads = [...topSidePads, ...bottomSidePads]
+  const quadPadDimensions =
+    leftRightSidePads.length > 0 && topBottomSidePads.length > 0
+      ? {
+          leftRightLength: median(
+            leftRightSidePads.map(({ bounds: bound }) => bound.width),
+          ),
+          leftRightWidth: median(
+            leftRightSidePads.map(({ bounds: bound }) => bound.height),
+          ),
+          topBottomLength: median(
+            topBottomSidePads.map(({ bounds: bound }) => bound.height),
+          ),
+          topBottomWidth: median(
+            topBottomSidePads.map(({ bounds: bound }) => bound.width),
+          ),
+        }
+      : undefined
   const gridOccupancy =
     topologyPads.length / Math.max(xCoordinates.length * yCoordinates.length, 1)
   const hasPadsOnFourSides =
@@ -2006,6 +2095,7 @@ const analyzeTarget = (target: Footprint): TargetAnalysis => {
     perimeterPadCount: sidePads.length,
     platedHoleCount,
     potentiometer: analyzePotentiometer(target),
+    quadPadDimensions,
     quadSidePadCounts,
     rj45,
     smdPushButton: analyzeSmdPushButton(target),
@@ -2020,6 +2110,7 @@ const analyzeTarget = (target: Footprint): TargetAnalysis => {
         }
       : undefined,
     topology,
+    twoPadSmd: analyzeTwoPadSmd(target),
     usbCMidMount: getUsbCMidMountGeometry(target),
     verticalSidePadCount: Math.max(
       quadSidePadCounts.bottom,
@@ -2501,12 +2592,22 @@ const encodeOrientationInFootprinterString = (
   return null
 }
 
-const getPreferredFamilies = (analysis: TargetAnalysis) => {
+const isLed2835Target = (
+  target: Footprint,
+  analysis: TargetAnalysis,
+): analysis is TargetAnalysis & { twoPadSmd: TwoPadSmdAnalysis } =>
+  Boolean(analysis.twoPadSmd) &&
+  `${target.title} ${target.subtitle} ${target.sourceHints?.join(" ") ?? ""}`
+    .toLowerCase()
+    .includes("2835")
+
+const getPreferredFamilies = (target: Footprint, analysis: TargetAnalysis) => {
   if (analysis.dpak) return new Set([analysis.dpak.family])
   if (analysis.smdPushButton) return new Set(["smdpushbutton"])
   if (analysis.smdSlideSwitch) return new Set(["smdslideswitch"])
   if (analysis.jstSmd) return new Set(["jst"])
   if (analysis.jstThroughHole) return new Set(["jst"])
+  if (isLed2835Target(target, analysis)) return new Set(["led2835"])
   if (analysis.potentiometer) return new Set(["potentiometer"])
   if (analysis.fpc) return new Set(["fpc"])
   if (analysis.rj45) return new Set(["rj45"])
@@ -2575,6 +2676,50 @@ const getQuadSidePinSuffix = (analysis: TargetAnalysis) => {
     `rightpins${right}`,
     `bottompins${bottom}`,
   ].join("_")
+}
+
+const getAsymmetricQfnSeed = (target: Footprint, analysis: TargetAnalysis) => {
+  const description = `${target.title} ${target.subtitle} ${
+    target.sourceHints?.join(" ") ?? ""
+  }`.toLowerCase()
+  const sidePinSuffix = getQuadSidePinSuffix(analysis)
+  const dimensions = analysis.quadPadDimensions
+  if (
+    !description.includes("qfn") ||
+    !sidePinSuffix ||
+    !dimensions ||
+    analysis.topology !== "four-sided"
+  ) {
+    return undefined
+  }
+
+  const { leftRightLength, leftRightWidth, topBottomLength, topBottomWidth } =
+    dimensions
+  if (
+    Math.abs(leftRightLength - topBottomLength) < 0.01 &&
+    Math.abs(leftRightWidth - topBottomWidth) < 0.01
+  ) {
+    return undefined
+  }
+
+  const parameters = [
+    `px${formatPitchLength(analysis.heuristics.px)}`,
+    ...(analysis.quadSidePadCounts.left > 1 ||
+    analysis.quadSidePadCounts.right > 1
+      ? [`py${formatPitchLength(analysis.heuristics.py)}`]
+      : []),
+    `w${formatPreciseLength(analysis.heuristics.w)}`,
+    `h${formatPreciseLength(analysis.heuristics.h)}`,
+    `pw${formatPreciseLength(topBottomWidth)}`,
+    `pl${formatPreciseLength(topBottomLength)}`,
+    `lrpw${formatPreciseLength(leftRightWidth)}`,
+    `lrpl${formatPreciseLength(leftRightLength)}`,
+  ]
+  const hasSquarePads = getPadGeometries(target).every(
+    ({ copper }) => copper.shape === "rect" && !copper.cornerRadius,
+  )
+
+  return `qfn${analysis.perimeterPadCount}_${sidePinSuffix}_${parameters.join("_")}${hasSquarePads ? "_rounded0" : ""}`
 }
 
 const getSot223Seed = (target: Footprint) => {
@@ -2934,6 +3079,24 @@ const generateSeeds = (target: Footprint, analysis: TargetAnalysis) => {
 
   const twoLeadThermalQfnSeed = getTwoLeadThermalQfnSeed(target, analysis)
   if (twoLeadThermalQfnSeed) seeds.add(twoLeadThermalQfnSeed)
+
+  const asymmetricQfnSeed = getAsymmetricQfnSeed(target, analysis)
+  if (asymmetricQfnSeed) seeds.add(asymmetricQfnSeed)
+
+  if (isLed2835Target(target, analysis)) {
+    const { padHeight, pin1Offset, pin1Width, pin2Offset, pin2Width } =
+      analysis.twoPadSmd
+    seeds.add(
+      [
+        "led2835",
+        `p1w${formatPreciseLength(pin1Width)}`,
+        `p2w${formatPreciseLength(pin2Width)}`,
+        `ph${formatPreciseLength(padHeight)}`,
+        `p1x${formatPreciseLength(pin1Offset)}`,
+        `p2x${formatPreciseLength(pin2Offset)}`,
+      ].join("_"),
+    )
+  }
 
   if (analysis.dpak) {
     const { family, numberOfPads, p, pl, pw, span, tabh, tabw } = analysis.dpak
@@ -3492,7 +3655,7 @@ const selectSeedsToOptimize = (
     )
   }
 
-  const preferredFamilies = getPreferredFamilies(analysis)
+  const preferredFamilies = getPreferredFamilies(target, analysis)
   for (const family of preferredFamilies) {
     const candidate =
       (analysis.thermalPad
