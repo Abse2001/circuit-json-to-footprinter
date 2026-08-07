@@ -2899,6 +2899,93 @@ const getBgaGridSeed = (target: Footprint) => {
   return `bga${pads.length}_grid${columns.length}x${rows.length}_p${formatPreciseLength(pitch)}_pad${formatPreciseLength(pad)}`
 }
 
+const getStaggeredSmdPinHeaderSeed = (target: Footprint) => {
+  const description = `${target.title} ${target.subtitle} ${
+    target.sourceHints?.join(" ") ?? ""
+  }`.toLowerCase()
+  if (!description.includes("staggered") && !description.includes("交错")) {
+    return undefined
+  }
+
+  const pads = getPadGeometries(target)
+  if (
+    pads.length < 3 ||
+    pads.some(
+      ({ copper, drill, element }) =>
+        element.type !== "pcb_smtpad" || drill || copper.shape !== "rect",
+    )
+  ) {
+    return undefined
+  }
+
+  const bounds = pads.map(({ copper }) => getPadBounds(copper))
+  const medianWidth = median(bounds.map(({ width }) => width))
+  const medianHeight = median(bounds.map(({ height }) => height))
+  const tolerance = Math.max(0.005, Math.min(medianWidth, medianHeight) * 0.05)
+  if (
+    bounds.some(
+      ({ width, height }) =>
+        Math.abs(width - medianWidth) > tolerance ||
+        Math.abs(height - medianHeight) > tolerance,
+    )
+  ) {
+    return undefined
+  }
+
+  for (const [alongAxis, crossAxis] of [
+    ["x", "y"],
+    ["y", "x"],
+  ] as const) {
+    const sortedPads = [...pads].sort(
+      (left, right) => left.copper[alongAxis] - right.copper[alongAxis],
+    )
+    const pitches = sortedPads
+      .slice(1)
+      .map(
+        ({ copper }, index) =>
+          copper[alongAxis] - sortedPads[index]!.copper[alongAxis],
+      )
+    const pitch = median(pitches)
+    if (
+      pitch <= tolerance ||
+      pitches.some((candidate) => Math.abs(candidate - pitch) > tolerance)
+    ) {
+      continue
+    }
+
+    const rows = clusterCoordinates(
+      pads.map(({ copper }) => copper[crossAxis]),
+      tolerance,
+    )
+    if (rows.length !== 2) continue
+
+    const rowIndexes = sortedPads.map(({ copper }) =>
+      Math.abs(copper[crossAxis] - rows[0]!) <= tolerance ? 0 : 1,
+    )
+    const firstRowIndex = rowIndexes[0]!
+    if (
+      rowIndexes.some(
+        (rowIndex, index) =>
+          rowIndex !== (index % 2 === 0 ? firstRowIndex : 1 - firstRowIndex),
+      )
+    ) {
+      continue
+    }
+
+    const padWidth = alongAxis === "x" ? medianWidth : medianHeight
+    const padHeight = alongAxis === "x" ? medianHeight : medianWidth
+    return [
+      `smdpinheader${pads.length}`,
+      `p${formatPitchLength(pitch)}`,
+      `py${formatPitchLength(Math.abs(rows[1]! - rows[0]!))}`,
+      `pw${formatPreciseLength(padWidth)}`,
+      `ph${formatPreciseLength(padHeight)}`,
+    ].join("_")
+  }
+
+  return undefined
+}
+
 const getTwoSidedDfnSeed = (target: Footprint) => {
   const pads = getPadGeometries(target)
   if (
@@ -3073,6 +3160,9 @@ const generateSeeds = (target: Footprint, analysis: TargetAnalysis) => {
 
   const bgaGridSeed = getBgaGridSeed(target)
   if (bgaGridSeed) seeds.add(bgaGridSeed)
+
+  const staggeredSmdPinHeaderSeed = getStaggeredSmdPinHeaderSeed(target)
+  if (staggeredSmdPinHeaderSeed) seeds.add(staggeredSmdPinHeaderSeed)
 
   const twoSidedDfnSeed = getTwoSidedDfnSeed(target)
   if (twoSidedDfnSeed) seeds.add(twoSidedDfnSeed)
