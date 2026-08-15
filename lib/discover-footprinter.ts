@@ -19,6 +19,7 @@ import {
 const MAX_OPTIMIZED_SEEDS = 10
 const OPTIMIZATION_STEPS = 16
 const PIN_MISMATCH_RANKING_WEIGHT = 0.01
+const MIN_HINTED_PASSIVE_COPPER_IOU = 0.96
 const NUMERIC_PARAMETERS = [
   "p",
   "px",
@@ -2444,6 +2445,35 @@ const getDomainScore = (target: Footprint, family: string) => {
   return terms.some((term) => description.includes(term)) ? 1 : 0
 }
 
+const getHintedPassiveSize = (target: Footprint, analysis: TargetAnalysis) => {
+  if (!analysis.twoPadSmd) return undefined
+
+  const imperialSizes = new Set(
+    getFootprintSizes().map(({ imperial }) => imperial),
+  )
+  const description = `${target.title} ${target.subtitle} ${
+    target.sourceHints?.join(" ") ?? ""
+  }`
+  const hintedSizes = [
+    ...description.matchAll(/(?:^|[^0-9])(\d{4,5})(?=[^0-9]|$)/g),
+  ]
+    .map((match) => match[1])
+    .filter((size): size is string => imperialSizes.has(size))
+
+  return hintedSizes.at(-1)
+}
+
+const getHintedPassiveSizePreference = (
+  footprinterString: string,
+  hintedSize: string,
+) => {
+  if (new RegExp(`^${hintedSize}(?:_|$)`).test(footprinterString)) return 2
+  if (new RegExp(`^(?:res|cap)${hintedSize}(?:_|$)`).test(footprinterString)) {
+    return 1
+  }
+  return 0
+}
+
 const getFamily = (footprinterString: string) => {
   if (/^\d{4,5}(?:_|$)/.test(footprinterString)) return "res"
   return (
@@ -3786,7 +3816,15 @@ const generateSeeds = (target: Footprint, analysis: TargetAnalysis) => {
   }
 
   if (padCount === 2 && analysis.platedHoleCount === 0) {
-    const padBounds = getCopperShapes(target).map(getPadBounds)
+    const targetCopperShapes = getCopperShapes(target)
+    const padBounds = targetCopperShapes.map(getPadBounds)
+    const rectCornerRadii = targetCopperShapes.flatMap((pad) =>
+      pad.shape === "rect" ? [pad.cornerRadius ?? 0] : [],
+    )
+    const roundedModifier =
+      rectCornerRadii.length === padCount
+        ? `_rounded${formatLength(median(rectCornerRadii))}`
+        : ""
     const passiveDimensions = `p${formatLength(
       analysis.heuristics.p,
     )}_pw${formatLength(
@@ -3798,6 +3836,11 @@ const generateSeeds = (target: Footprint, analysis: TargetAnalysis) => {
       seeds.add(size.imperial)
       seeds.add(`cap${size.imperial}`)
       seeds.add(`res${size.imperial}`)
+      if (roundedModifier) {
+        seeds.add(`${size.imperial}${roundedModifier}`)
+        seeds.add(`cap${size.imperial}${roundedModifier}`)
+        seeds.add(`res${size.imperial}${roundedModifier}`)
+      }
     }
   }
 
@@ -4184,6 +4227,7 @@ export const discoverFootprinterString = (
   maxCandidates = 5,
 ): FootprinterDiscoveryResult => {
   const analysis = analyzeTarget(target)
+  const hintedPassiveSize = getHintedPassiveSize(target, analysis)
   const rawSeeds = generateSeeds(target, analysis)
   const seedCandidates = rawSeeds.flatMap((footprinterString) => {
     const baseUnrotatedFootprint = tryBuild(footprinterString)
@@ -4232,8 +4276,21 @@ export const discoverFootprinterString = (
   const optimized = selectedSeeds.map((seed) =>
     optimizeSeed(seed, target, analysis),
   )
-  const allCandidates = [...optimized, ...seedCandidates]
-    .map((candidate): RankedDiscoveryCandidate => {
+  const compareCandidateQuality = (
+    left: RankedDiscoveryCandidate,
+    right: RankedDiscoveryCandidate,
+  ) =>
+    right.rankingScore - left.rankingScore ||
+    right.copperIntersectionOverUnion - left.copperIntersectionOverUnion ||
+    right.holeIntersectionOverUnion - left.holeIntersectionOverUnion ||
+    right.pinMatchRate - left.pinMatchRate ||
+    right.domainScore - left.domainScore ||
+    right.geometryScore - left.geometryScore ||
+    left.searchRotation - right.searchRotation ||
+    left.footprinterString.length - right.footprinterString.length
+
+  const allCandidates = [...optimized, ...seedCandidates].map(
+    (candidate): RankedDiscoveryCandidate => {
       const {
         copperIntersectionOverUnion,
         holeIntersectionOverUnion,
@@ -4269,18 +4326,40 @@ export const discoverFootprinterString = (
           (pinMatchRate - 1) * PIN_MISMATCH_RANKING_WEIGHT,
         searchRotation: candidate.searchRotation,
       }
-    })
-    .sort(
-      (left, right) =>
-        right.rankingScore - left.rankingScore ||
-        right.copperIntersectionOverUnion - left.copperIntersectionOverUnion ||
-        right.holeIntersectionOverUnion - left.holeIntersectionOverUnion ||
-        right.pinMatchRate - left.pinMatchRate ||
-        right.domainScore - left.domainScore ||
-        right.geometryScore - left.geometryScore ||
-        left.searchRotation - right.searchRotation ||
-        left.footprinterString.length - right.footprinterString.length,
-    )
+    },
+  )
+  const preferredPassiveCandidate = hintedPassiveSize
+    ? allCandidates
+        .filter(
+          ({ copperIntersectionOverUnion, footprinterString }) =>
+            getHintedPassiveSizePreference(
+              footprinterString,
+              hintedPassiveSize,
+            ) > 0 &&
+            copperIntersectionOverUnion >= MIN_HINTED_PASSIVE_COPPER_IOU,
+        )
+        .toSorted(
+          (left, right) =>
+            getHintedPassiveSizePreference(
+              right.footprinterString,
+              hintedPassiveSize,
+            ) -
+              getHintedPassiveSizePreference(
+                left.footprinterString,
+                hintedPassiveSize,
+              ) || compareCandidateQuality(left, right),
+        )[0]
+    : undefined
+  allCandidates.sort((left, right) => {
+    // JLCPCB's explicit package size is more useful than reproducing small
+    // manufacturer-specific land-pattern differences with a generic,
+    // parameterized passive. Promote only the best-oriented canonical
+    // candidate so accurate custom alternatives remain visible.
+    const passiveSizePreference =
+      Number(right === preferredPassiveCandidate) -
+      Number(left === preferredPassiveCandidate)
+    return passiveSizePreference || compareCandidateQuality(left, right)
+  })
 
   const uniqueCandidates: FootprinterDiscoveryCandidate[] = []
   const seenStrings = new Set<string>()
