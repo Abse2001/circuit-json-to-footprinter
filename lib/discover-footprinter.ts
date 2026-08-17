@@ -2432,6 +2432,7 @@ const getDomainScore = (target: Footprint, family: string) => {
     fpc: ["fpc", "ffc", "flat flexible"],
     jst: ["jst", "smd p=", "smd,p=", "wire-to-board", "wire to board"],
     lga: ["lga"],
+    passive: ["passive", "fuse", "inductor"],
     qfn: ["qfn"],
     res: ["resistor", "res"],
     soic: ["soic", "so-"],
@@ -2473,19 +2474,54 @@ const getHintedPassiveSize = (target: Footprint, analysis: TargetAnalysis) => {
   return hintedSizes.at(-1)
 }
 
+type HintedPassiveFamily = "cap" | "res"
+
+const getHintedPassiveFamily = (
+  target: Footprint,
+): HintedPassiveFamily | undefined => {
+  const description = `${target.title} ${target.subtitle} ${
+    target.sourceHints?.join(" ") ?? ""
+  }`
+  const hasResistorHint =
+    /(?:^|[^a-z0-9])(?:res|resistors?)(?:$|[^a-z0-9])/i.test(description) ||
+    /(?:^|[^a-z0-9])res\d{4,5}(?:_|$)/i.test(description)
+  const hasCapacitorHint =
+    /(?:^|[^a-z0-9])(?:cap|capacitors?)(?:$|[^a-z0-9])/i.test(description) ||
+    /(?:^|[^a-z0-9])cap\d{4,5}(?:_|$)/i.test(description)
+
+  if (hasResistorHint === hasCapacitorHint) return undefined
+  return hasResistorHint ? "res" : "cap"
+}
+
 const getHintedPassiveSizePreference = (
   footprinterString: string,
   hintedSize: string,
+  hintedFamily: HintedPassiveFamily | undefined,
 ) => {
-  if (new RegExp(`^${hintedSize}(?:_|$)`).test(footprinterString)) return 2
+  const canonicalSizePattern = new RegExp(`^${hintedSize}(?:_|$)`)
+  if (hintedFamily) {
+    if (
+      new RegExp(`^${hintedFamily}${hintedSize}(?:_|$)`).test(footprinterString)
+    ) {
+      return 4
+    }
+    if (new RegExp(`^${hintedFamily}(?:\\d|_)`).test(footprinterString)) {
+      return 3
+    }
+    if (canonicalSizePattern.test(footprinterString)) return 2
+    return 0
+  }
+  if (canonicalSizePattern.test(footprinterString)) return 3
   if (new RegExp(`^(?:res|cap)${hintedSize}(?:_|$)`).test(footprinterString)) {
-    return 1
+    return 2
   }
   return 0
 }
 
 const getFamily = (footprinterString: string) => {
-  if (/^\d{4,5}(?:_|$)/.test(footprinterString)) return "res"
+  if (/^(?:\d{4,5}|smdpads2)(?:_|$)/i.test(footprinterString)) {
+    return "passive"
+  }
   return (
     [...getFootprintNames()]
       .sort((left, right) => right.length - left.length)
@@ -3358,7 +3394,11 @@ const generateSeeds = (target: Footprint, analysis: TargetAnalysis) => {
       analysis.twoPadSmd
     const pitch = Math.abs(pin2Offset - pin1Offset)
     const padWidth = median([pin1Width, pin2Width])
-    for (const family of ["cap", "diode", "res"]) {
+    // Two-pad copper geometry alone cannot distinguish a resistor, capacitor,
+    // diode, LED, inductor, or fuse. Keep a neutral candidate alongside the
+    // type-specific passive definitions so ambiguous inputs never acquire a
+    // misleading component type from a geometry tie.
+    for (const family of ["smdpads2", "cap", "diode", "res"]) {
       const parameters = [
         family,
         `p${formatPreciseLength(pitch)}`,
@@ -3368,6 +3408,19 @@ const generateSeeds = (target: Footprint, analysis: TargetAnalysis) => {
       // The generic diode defaults to rounded pads, while imported JLCPCB
       // pads are rectangular unless Circuit JSON specifies a corner radius.
       if (family === "diode") parameters.push("rounded0")
+      if (family === "smdpads2") {
+        const cornerRadii = getCopperShapes(target).flatMap((pad) =>
+          pad.shape === "rect" && (pad.cornerRadius ?? 0) > 0
+            ? [pad.cornerRadius!]
+            : [],
+        )
+        if (cornerRadii.length === 2) {
+          const cornerRadius = median(cornerRadii)
+          if (cornerRadius > 0) {
+            parameters.push(`rounded${formatPreciseLength(cornerRadius)}`)
+          }
+        }
+      }
       seeds.add(parameters.join("_"))
     }
   }
@@ -3854,11 +3907,16 @@ const generateSeeds = (target: Footprint, analysis: TargetAnalysis) => {
       rectCornerRadii.length === padCount
         ? `_rounded${formatLength(median(rectCornerRadii))}`
         : ""
+    const passiveRoundedModifier =
+      rectCornerRadii.length === padCount && median(rectCornerRadii) > 0
+        ? roundedModifier
+        : ""
     const passiveDimensions = `p${formatLength(
       analysis.heuristics.p,
     )}_pw${formatLength(
       median(padBounds.map((bound) => bound.width)),
     )}_ph${formatLength(median(padBounds.map((bound) => bound.height)))}`
+    seeds.add(`smdpads2_${passiveDimensions}${passiveRoundedModifier}`)
     seeds.add(`res_${passiveDimensions}`)
     seeds.add(`cap_${passiveDimensions}`)
     for (const size of getFootprintSizes()) {
@@ -4256,6 +4314,7 @@ export const discoverFootprinterString = (
   maxCandidates = 5,
 ): FootprinterDiscoveryResult => {
   const analysis = analyzeTarget(target)
+  const hintedPassiveFamily = getHintedPassiveFamily(target)
   const hintedPassiveSize = getHintedPassiveSize(target, analysis)
   const rawSeeds = generateSeeds(target, analysis)
   const seedCandidates = rawSeeds.flatMap((footprinterString) => {
@@ -4314,6 +4373,7 @@ export const discoverFootprinterString = (
     right.holeIntersectionOverUnion - left.holeIntersectionOverUnion ||
     right.pinMatchRate - left.pinMatchRate ||
     right.domainScore - left.domainScore ||
+    Number(right.family === "passive") - Number(left.family === "passive") ||
     right.geometryScore - left.geometryScore ||
     left.searchRotation - right.searchRotation ||
     left.footprinterString.length - right.footprinterString.length
@@ -4327,7 +4387,11 @@ export const discoverFootprinterString = (
         pinMismatches,
         pinsMatch,
       } = summarizeCopperComparison(candidate.footprint, target)
-      const domainScore = getDomainScore(target, candidate.family)
+      const domainScore =
+        (candidate.family === "res" || candidate.family === "cap") &&
+        hintedPassiveFamily !== candidate.family
+          ? 0
+          : getDomainScore(target, candidate.family)
       return {
         copperIntersectionOverUnion,
         domainScore,
@@ -4364,6 +4428,7 @@ export const discoverFootprinterString = (
             getHintedPassiveSizePreference(
               footprinterString,
               hintedPassiveSize,
+              hintedPassiveFamily,
             ) > 0 &&
             copperIntersectionOverUnion >= MIN_HINTED_PASSIVE_COPPER_IOU,
         )
@@ -4372,10 +4437,12 @@ export const discoverFootprinterString = (
             getHintedPassiveSizePreference(
               right.footprinterString,
               hintedPassiveSize,
+              hintedPassiveFamily,
             ) -
               getHintedPassiveSizePreference(
                 left.footprinterString,
                 hintedPassiveSize,
+                hintedPassiveFamily,
               ) || compareCandidateQuality(left, right),
         )[0]
     : undefined
