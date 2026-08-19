@@ -1,12 +1,10 @@
 import { expect, test } from "bun:test"
-import type { AnyCircuitElement, PcbSilkscreenText } from "circuit-json"
+import { Circuit } from "@tscircuit/core"
 import { convertCircuitJsonToPcbSvg } from "circuit-to-svg"
 import { Fragment } from "react"
-import { footprinterStringToFootprint } from "../lib/index.js"
-import {
-  expectFootprintRecovery,
-  renderFootprintToCircuitJson,
-} from "./fixture/jlcpcb-reproduction-utils.js"
+import { circuitJsonToFootprinter } from "../lib/index.js"
+import { DBT50G_7_62_2P_BK_P } from "./fixture/DBT50G_7_62_2P_BK_P.js"
+import { expectFootprintRecovery } from "./fixture/jlcpcb-reproduction-utils.js"
 
 const Txs0102Dqer = () => (
   <chip
@@ -153,50 +151,6 @@ const A3362P1103Lf = () => (
   />
 )
 
-const Dbt50G7622P = () => (
-  <chip
-    name="J1"
-    footprint={
-      <footprint>
-        {[-3.81, 3.81].map((pcbX, index) => (
-          <Fragment key={pcbX}>
-            <platedhole
-              portHints={[`pin${index + 1}`]}
-              pcbX={pcbX}
-              pcbY={0}
-              outerDiameter={2.5999948}
-              holeDiameter={1.5999968}
-              shape="circle"
-            />
-          </Fragment>
-        ))}
-      </footprint>
-    }
-  />
-)
-
-const shiftFootprint = (
-  elements: AnyCircuitElement[],
-  xOffset: number,
-): AnyCircuitElement[] =>
-  elements.map((element) =>
-    "x" in element && typeof element.x === "number"
-      ? { ...element, x: element.x + xOffset }
-      : element,
-  )
-
-const createComparisonLabel = (text: string, x: number): PcbSilkscreenText => ({
-  type: "pcb_silkscreen_text",
-  pcb_silkscreen_text_id: `comparison_label_${text}`,
-  pcb_component_id: "comparison",
-  font: "tscircuit2024",
-  font_size: 0.8,
-  text,
-  layer: "top",
-  anchor_position: { x, y: 2.5 },
-  anchor_alignment: "center",
-})
-
 test("keeps 5 um pad precision when recovering C2652935", async () => {
   const result = await expectFootprintRecovery({
     FootprintComponent: Txs0102Dqer,
@@ -255,31 +209,40 @@ test("recovers C58159 as a measured potentiometer", async () => {
 })
 
 test("does not classify C496127 barrier terminal as radial", async () => {
-  const result = await expectFootprintRecovery({
-    FootprintComponent: Dbt50G7622P,
+  const jlcCircuit = new Circuit()
+  jlcCircuit.add(<DBT50G_7_62_2P_BK_P name="JLC_C496127" />)
+  await jlcCircuit.renderUntilSettled()
+  const jlcCircuitJson = jlcCircuit.getCircuitJson()
+  expect(
+    jlcCircuitJson.some(({ type }) => type === "pcb_silkscreen_path"),
+  ).toBe(true)
+
+  const result = circuitJsonToFootprinter(jlcCircuitJson, {
+    maxCandidates: 5,
     sourceHints: [
       "C496127 DBT50G-7.62-2P CONN-TH_2P-P7.62_L15.2-W16.7-EX4.2 Barrier Terminal Blocks",
     ],
   })
 
+  expect(result.best).not.toBeNull()
+  expect(result.best!.copperIntersectionOverUnion).toBeGreaterThanOrEqual(0.99)
   expect(result.best!.family).not.toBe("radial")
   expect(result.candidates.every(({ family }) => family !== "radial")).toBe(
     true,
   )
 
-  const jlcFootprint = await renderFootprintToCircuitJson(Dbt50G7622P)
-  const matchedFootprint = footprinterStringToFootprint(
-    result.best!.footprinterString,
+  const comparisonCircuit = new Circuit()
+  comparisonCircuit.add(<DBT50G_7_62_2P_BK_P name="JLC_C496127" pcbX={-10} />)
+  comparisonCircuit.add(
+    <chip
+      name="MATCHED"
+      footprint={result.best!.footprinterString}
+      pcbX={10}
+    />,
   )
-  const comparison = [
-    ...shiftFootprint(jlcFootprint, -7),
-    ...shiftFootprint(matchedFootprint.pads, 7),
-    createComparisonLabel("JLC C496127", -7),
-    createComparisonLabel("Matched", 7),
-  ]
+  await comparisonCircuit.renderUntilSettled()
 
-  expect(convertCircuitJsonToPcbSvg(comparison)).toMatchSvgSnapshot(
-    import.meta.path,
-    "C496127-jlc-vs-match",
-  )
+  expect(
+    convertCircuitJsonToPcbSvg(comparisonCircuit.getCircuitJson()),
+  ).toMatchSvgSnapshot(import.meta.path, "C496127-jlc-vs-match")
 })
