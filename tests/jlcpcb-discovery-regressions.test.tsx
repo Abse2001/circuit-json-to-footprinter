@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test"
+import type { AnyCircuitElement, PcbSilkscreenText } from "circuit-json"
+import { convertCircuitJsonToPcbSvg } from "circuit-to-svg"
 import { Fragment } from "react"
-import { expectFootprintRecovery } from "./fixture/jlcpcb-reproduction-utils.js"
+import { footprinterStringToFootprint } from "../lib/index.js"
+import {
+  expectFootprintRecovery,
+  renderFootprintToCircuitJson,
+} from "./fixture/jlcpcb-reproduction-utils.js"
 
 const Txs0102Dqer = () => (
   <chip
@@ -169,6 +175,28 @@ const Dbt50G7622P = () => (
   />
 )
 
+const shiftFootprint = (
+  elements: AnyCircuitElement[],
+  xOffset: number,
+): AnyCircuitElement[] =>
+  elements.map((element) =>
+    "x" in element && typeof element.x === "number"
+      ? { ...element, x: element.x + xOffset }
+      : element,
+  )
+
+const createComparisonLabel = (text: string, x: number): PcbSilkscreenText => ({
+  type: "pcb_silkscreen_text",
+  pcb_silkscreen_text_id: `comparison_label_${text}`,
+  pcb_component_id: "comparison",
+  font: "tscircuit2024",
+  font_size: 0.8,
+  text,
+  layer: "top",
+  anchor_position: { x, y: 2.5 },
+  anchor_alignment: "center",
+})
+
 test("keeps 5 um pad precision when recovering C2652935", async () => {
   const result = await expectFootprintRecovery({
     FootprintComponent: Txs0102Dqer,
@@ -237,5 +265,21 @@ test("does not classify C496127 barrier terminal as radial", async () => {
   expect(result.best!.family).not.toBe("radial")
   expect(result.candidates.every(({ family }) => family !== "radial")).toBe(
     true,
+  )
+
+  const jlcFootprint = await renderFootprintToCircuitJson(Dbt50G7622P)
+  const matchedFootprint = footprinterStringToFootprint(
+    result.best!.footprinterString,
+  )
+  const comparison = [
+    ...shiftFootprint(jlcFootprint, -7),
+    ...shiftFootprint(matchedFootprint.pads, 7),
+    createComparisonLabel("JLC C496127", -7),
+    createComparisonLabel("Matched", 7),
+  ]
+
+  expect(convertCircuitJsonToPcbSvg(comparison)).toMatchSvgSnapshot(
+    import.meta.path,
+    "C496127-jlc-vs-match",
   )
 })
