@@ -3353,7 +3353,6 @@ const generateSeeds = (target: Footprint, analysis: TargetAnalysis) => {
   const quadSidePinSuffix = getQuadSidePinSuffix(analysis)
 
   for (const family of getFootprintNames()) {
-    if (family === "radial") continue
     seeds.add(`${family}${padCount}`)
     // Mid-mount USB-C variants are named by their explicit 16-pin form.
     if (family !== "usbcmidmount") seeds.add(family)
