@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test"
-import { Circuit } from "@tscircuit/core"
-import { convertCircuitJsonToPcbSvg } from "circuit-to-svg"
 import { Fragment } from "react"
-import { circuitJsonToFootprinter } from "../lib/index.js"
 import { DBT50G_7_62_2P_BK_P } from "./fixture/DBT50G_7_62_2P_BK_P.js"
-import { expectFootprintRecovery } from "./fixture/jlcpcb-reproduction-utils.js"
+import {
+  expectFootprintRecovery,
+  expectJlcpcbFootprintComparison,
+} from "./fixture/jlcpcb-reproduction-utils.js"
 
 const Txs0102Dqer = () => (
   <chip
@@ -209,40 +209,29 @@ test("recovers C58159 as a measured potentiometer", async () => {
 })
 
 test("does not classify C496127 barrier terminal as radial", async () => {
-  const jlcCircuit = new Circuit()
-  jlcCircuit.add(<DBT50G_7_62_2P_BK_P name="JLC_C496127" />)
-  await jlcCircuit.renderUntilSettled()
-  const jlcCircuitJson = jlcCircuit.getCircuitJson()
-  expect(
-    jlcCircuitJson.some(({ type }) => type === "pcb_silkscreen_path"),
-  ).toBe(true)
-
-  const result = circuitJsonToFootprinter(jlcCircuitJson, {
-    maxCandidates: 5,
+  const { result, sourceCircuitJson } = await expectJlcpcbFootprintComparison({
+    expectedFootprinterString:
+      "pinrow2_nosquareplating_p7.62mm_od2.6mm_id1.6mm",
+    jlcpcbPartNumber: "C496127",
+    minimumCopperIntersectionOverUnion: 0.9999,
+    renderJlcpcbComponent: (props) => <DBT50G_7_62_2P_BK_P {...props} />,
+    snapshotFilePath: import.meta.path,
     sourceHints: [
       "C496127 DBT50G-7.62-2P CONN-TH_2P-P7.62_L15.2-W16.7-EX4.2 Barrier Terminal Blocks",
     ],
   })
 
-  expect(result.best).not.toBeNull()
-  expect(result.best!.copperIntersectionOverUnion).toBeGreaterThanOrEqual(0.99)
-  expect(result.best!.family).not.toBe("radial")
+  expect(
+    sourceCircuitJson.filter(
+      ({ type }) =>
+        type === "pcb_silkscreen_path" || type === "pcb_silkscreen_rect",
+    ),
+  ).toHaveLength(12)
+  expect(result.best!.family).toBe("pinrow")
+  expect(
+    Number((result.best!.copperIntersectionOverUnion * 100).toFixed(2)),
+  ).toBe(100)
   expect(result.candidates.every(({ family }) => family !== "radial")).toBe(
     true,
   )
-
-  const comparisonCircuit = new Circuit()
-  comparisonCircuit.add(<DBT50G_7_62_2P_BK_P name="JLC_C496127" pcbX={-10} />)
-  comparisonCircuit.add(
-    <chip
-      name="MATCHED"
-      footprint={result.best!.footprinterString}
-      pcbX={10}
-    />,
-  )
-  await comparisonCircuit.renderUntilSettled()
-
-  expect(
-    convertCircuitJsonToPcbSvg(comparisonCircuit.getCircuitJson()),
-  ).toMatchSvgSnapshot(import.meta.path, "C496127-jlc-vs-match")
 })

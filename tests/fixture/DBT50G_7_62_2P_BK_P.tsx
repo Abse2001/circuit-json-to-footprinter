@@ -30,6 +30,22 @@ export const DBT50G_7_62_2P_BK_P = (props: ChipProps<typeof pinLabels>) => {
             holeDiameter="1.5999968mm"
             shape="circle"
           />
+          {/* The EasyEDA source contains two layer-3 RECT primitives that the
+              current tsci importer omits from its generated TSX. */}
+          <silkscreenrect
+            pcbX="0.08001mm"
+            pcbY="-3.0501844mm"
+            width="16.599916mm"
+            height="15.200122mm"
+            strokeWidth="0.254mm"
+          />
+          <silkscreenrect
+            pcbX="0.004953mm"
+            pcbY="-3.0500574mm"
+            width="1.450086mm"
+            height="15.199868mm"
+            strokeWidth="0.254mm"
+          />
           <silkscreenpath
             route={[
               { x: -3.7999923999998373, y: -1.5500096000000667 },
