@@ -147,6 +147,28 @@ const A3362P1103Lf = () => (
   />
 )
 
+const Dbt50G7622P = () => (
+  <chip
+    name="J1"
+    footprint={
+      <footprint>
+        {[-3.81, 3.81].map((pcbX, index) => (
+          <Fragment key={pcbX}>
+            <platedhole
+              portHints={[`pin${index + 1}`]}
+              pcbX={pcbX}
+              pcbY={0}
+              outerDiameter={2.5999948}
+              holeDiameter={1.5999968}
+              shape="circle"
+            />
+          </Fragment>
+        ))}
+      </footprint>
+    }
+  />
+)
+
 test("keeps 5 um pad precision when recovering C2652935", async () => {
   const result = await expectFootprintRecovery({
     FootprintComponent: Txs0102Dqer,
@@ -201,5 +223,19 @@ test("recovers C58159 as a measured potentiometer", async () => {
 
   expect(result.best!.footprinterString).toBe(
     "potentiometer_p2.54mm_h2.54mm_od1.524mm_id0.762mm_pin1location(leftside,bottom)",
+  )
+})
+
+test("does not classify C496127 barrier terminal as radial", async () => {
+  const result = await expectFootprintRecovery({
+    FootprintComponent: Dbt50G7622P,
+    sourceHints: [
+      "C496127 DBT50G-7.62-2P CONN-TH_2P-P7.62_L15.2-W16.7-EX4.2 Barrier Terminal Blocks",
+    ],
+  })
+
+  expect(result.best!.family).not.toBe("radial")
+  expect(result.candidates.every(({ family }) => family !== "radial")).toBe(
+    true,
   )
 })

@@ -2802,6 +2802,10 @@ const isLed2835Target = (
     .toLowerCase()
     .includes("2835")
 
+// Radial footprints describe capacitor packages and should only be selected
+// explicitly, not inferred from generic through-hole pad geometry.
+const EXCLUDED_DISCOVERY_FAMILIES = new Set(["radial"])
+
 const getPreferredFamilies = (target: Footprint, analysis: TargetAnalysis) => {
   if (analysis.dpak) return new Set([analysis.dpak.family])
   if (analysis.smdPushButton) return new Set(["smdpushbutton"])
@@ -2818,7 +2822,6 @@ const getPreferredFamilies = (target: Footprint, analysis: TargetAnalysis) => {
       "electrolytic",
       "jst",
       "pinrow",
-      "radial",
       "to220",
       "to92",
       "usbcmidmount",
@@ -3354,6 +3357,7 @@ const generateSeeds = (target: Footprint, analysis: TargetAnalysis) => {
   const quadSidePinSuffix = getQuadSidePinSuffix(analysis)
 
   for (const family of getFootprintNames()) {
+    if (EXCLUDED_DISCOVERY_FAMILIES.has(family)) continue
     seeds.add(`${family}${padCount}`)
     // Mid-mount USB-C variants are named by their explicit 16-pin form.
     if (family !== "usbcmidmount") seeds.add(family)
